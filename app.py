@@ -125,9 +125,18 @@ class AREarTracker:
         )
 
         # ── load earring BGRA ──
+        import os
+        if not os.path.isabs(earring_path):
+            earring_path = os.path.join(os.path.dirname(__file__), earring_path)
+        
         img = cv2.imread(earring_path, cv2.IMREAD_UNCHANGED)
         if img is None:
-            raise FileNotFoundError(f"Cannot load '{earring_path}'")
+            # Try alternative path
+            alt_path = os.path.join(os.getcwd(), "earring.png")
+            img = cv2.imread(alt_path, cv2.IMREAD_UNCHANGED)
+            if img is None:
+                raise FileNotFoundError(f"Cannot load earring image from '{earring_path}' or '{alt_path}'")
+        
         if img.shape[2] == 3:                       # add alpha if missing
             img = np.dstack([img, np.full(img.shape[:2], 255, np.uint8)])
         self.earring_L = img                        # left side of image
@@ -341,20 +350,59 @@ tracker = None
 def index():
     return render_template('index.html')
 
+@app.route('/test_earring')
+def test_earring():
+    from flask import jsonify
+    import os
+    try:
+        # Check if file exists
+        earring_path = os.path.join(os.path.dirname(__file__), "earring.png")
+        alt_path = os.path.join(os.getcwd(), "earring.png")
+        
+        file_exists = os.path.exists(earring_path)
+        alt_exists = os.path.exists(alt_path)
+        
+        # Try to load the image
+        img = cv2.imread(earring_path if file_exists else alt_path, cv2.IMREAD_UNCHANGED)
+        
+        return jsonify({
+            'earring_path': earring_path,
+            'alt_path': alt_path,
+            'file_exists': file_exists,
+            'alt_exists': alt_exists,
+            'image_loaded': img is not None,
+            'image_shape': img.shape if img is not None else None,
+            'cwd': os.getcwd(),
+            'script_dir': os.path.dirname(__file__)
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)})
+
 @app.route('/process_frame', methods=['POST'])
 def process_frame():
     from flask import request, jsonify
     global tracker
     
     if tracker is None:
-        tracker = AREarTracker("earring.png")
+        try:
+            tracker = AREarTracker("earring.png")
+            print("Tracker initialized successfully")
+        except Exception as e:
+            print(f"Error initializing tracker: {e}")
+            return jsonify({'error': f'Tracker initialization failed: {str(e)}'}), 500
     
     try:
         data = request.json
+        if not data or 'image' not in data:
+            return jsonify({'error': 'No image data provided'}), 400
+            
         img_data = data['image'].split(',')[1]
         img_bytes = base64.b64decode(img_data)
         nparr = np.frombuffer(img_bytes, np.uint8)
         frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        
+        if frame is None:
+            return jsonify({'error': 'Failed to decode image'}), 400
         
         processed = tracker.process(frame)
         
@@ -363,6 +411,7 @@ def process_frame():
         
         return jsonify({'image': f'data:image/jpeg;base64,{img_str}'})
     except Exception as e:
+        print(f"Error processing frame: {e}")
         return jsonify({'error': str(e)}), 500
 
 if __name__ == "__main__":
