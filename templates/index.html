@@ -5,14 +5,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>AR Earring Try-On</title>
     <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
-        
+        * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             min-height: 100vh;
             display: flex;
@@ -21,14 +16,12 @@
             justify-content: center;
             padding: 20px;
         }
-        
         h1 {
             color: white;
             margin-bottom: 30px;
             font-size: 2.5rem;
             text-shadow: 2px 2px 4px rgba(0,0,0,0.2);
         }
-        
         .container {
             background: white;
             border-radius: 20px;
@@ -37,7 +30,6 @@
             max-width: 900px;
             width: 100%;
         }
-        
         .video-container {
             position: relative;
             width: 100%;
@@ -45,14 +37,12 @@
             overflow: hidden;
             background: #000;
         }
-        
         #videoElement {
             width: 100%;
             height: auto;
             display: block;
             transform: scaleX(-1);
         }
-        
         #canvas {
             position: absolute;
             top: 0;
@@ -61,15 +51,12 @@
             height: 100%;
             transform: scaleX(-1);
         }
-        
         .controls {
             margin-top: 20px;
             display: flex;
             gap: 15px;
             justify-content: center;
-            flex-wrap: wrap;
         }
-        
         button {
             padding: 12px 30px;
             font-size: 16px;
@@ -79,51 +66,27 @@
             transition: all 0.3s ease;
             font-weight: 600;
         }
-        
-        #startButton {
-            background: #667eea;
-            color: white;
-        }
-        
+        #startButton { background: #667eea; color: white; }
         #startButton:hover:not(:disabled) {
             background: #5568d3;
             transform: translateY(-2px);
             box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4);
         }
-        
-        #stopButton {
-            background: #f56565;
-            color: white;
-        }
-        
+        #stopButton { background: #f56565; color: white; }
         #stopButton:hover:not(:disabled) {
             background: #e53e3e;
             transform: translateY(-2px);
             box-shadow: 0 5px 15px rgba(245, 101, 101, 0.4);
         }
-        
-        button:disabled {
-            opacity: 0.5;
-            cursor: not-allowed;
-        }
-        
+        button:disabled { opacity: 0.5; cursor: not-allowed; }
         .status {
             margin-top: 15px;
             text-align: center;
             color: #666;
             font-size: 14px;
         }
-        
-        .loading {
-            display: none;
-            text-align: center;
-            margin-top: 20px;
-        }
-        
-        .loading.active {
-            display: block;
-        }
-        
+        .loading { display: none; text-align: center; margin-top: 20px; }
+        .loading.active { display: block; }
         .spinner {
             border: 3px solid #f3f3f3;
             border-top: 3px solid #667eea;
@@ -133,7 +96,6 @@
             animation: spin 1s linear infinite;
             margin: 0 auto;
         }
-        
         @keyframes spin {
             0% { transform: rotate(0deg); }
             100% { transform: rotate(360deg); }
@@ -142,20 +104,16 @@
 </head>
 <body>
     <h1>✨ AR Earring Try-On</h1>
-    
     <div class="container">
         <div class="video-container">
             <video id="videoElement" autoplay playsinline></video>
             <canvas id="canvas"></canvas>
         </div>
-        
         <div class="controls">
             <button id="startButton">Start Camera</button>
             <button id="stopButton" disabled>Stop</button>
         </div>
-        
         <div class="status" id="status">Click "Start Camera" to begin</div>
-        
         <div class="loading" id="loading">
             <div class="spinner"></div>
             <p>Loading MediaPipe...</p>
@@ -165,6 +123,262 @@
     <script type="module">
         import { FaceLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
 
+        // ═══════════════════════════════════════════════════════════════
+        // CONFIG
+        // ═══════════════════════════════════════════════════════════════
+        const NOSE = 1, LEFT_TRAG = 234, RIGHT_TRAG = 454;
+        const LEFT_EYE_OUTER = 33, RIGHT_EYE_OUTER = 263;
+        const LEFT_BASE = 93, LEFT_REF = 123;
+        const RIGHT_BASE = 323, RIGHT_REF = 352;
+        const FOREHEAD = 10, CHIN = 152;
+
+        const VIS_RATIO_THRESH = 0.75;
+        const EARLOBE_OFFSET = 0.47;
+        const EARRING_SIZE_RATIO = 0.25;
+        const TILT_DAMPING = 0.35;
+        const FADE_SPEED = 0.15;
+        const ANCHOR_Y_SHIFT = 0.0;
+
+        // ═══════════════════════════════════════════════════════════════
+        // ONE EURO FILTER
+        // ═══════════════════════════════════════════════════════════════
+        class OneEuroFilter {
+            constructor(t0, x0, minCutoff = 1.0, beta = 0.007, dCutoff = 1.0) {
+                this.minCutoff = minCutoff;
+                this.beta = beta;
+                this.dCutoff = dCutoff;
+                this.xPrev = x0;
+                this.dxPrev = 0.0;
+                this.tPrev = t0;
+            }
+
+            static alpha(te, cutoff) {
+                const r = 2.0 * Math.PI * cutoff * te;
+                return r / (r + 1.0);
+            }
+
+            filter(t, x) {
+                let te = t - this.tPrev;
+                if (te < 1e-9) te = 1e-6;
+
+                const ad = OneEuroFilter.alpha(te, this.dCutoff);
+                const dx = (x - this.xPrev) / te;
+                const dxHat = ad * dx + (1.0 - ad) * this.dxPrev;
+
+                const cutoff = this.minCutoff + this.beta * Math.abs(dxHat);
+                const a = OneEuroFilter.alpha(te, cutoff);
+                const xHat = a * x + (1.0 - a) * this.xPrev;
+
+                this.xPrev = xHat;
+                this.dxPrev = dxHat;
+                this.tPrev = t;
+                return xHat;
+            }
+        }
+
+        class PointStabilizer {
+            constructor(minCutoff = 1.0, beta = 0.007) {
+                this.fx = null;
+                this.fy = null;
+                this.minCutoff = minCutoff;
+                this.beta = beta;
+            }
+
+            update(t, x, y) {
+                if (!this.fx) {
+                    this.fx = new OneEuroFilter(t, x, this.minCutoff, this.beta);
+                    this.fy = new OneEuroFilter(t, y, this.minCutoff, this.beta);
+                    return [x, y];
+                }
+                return [this.fx.filter(t, x), this.fy.filter(t, y)];
+            }
+        }
+
+        class ScalarStabilizer {
+            constructor(minCutoff = 1.0, beta = 0.007) {
+                this.f = null;
+                this.minCutoff = minCutoff;
+                this.beta = beta;
+            }
+
+            update(t, v) {
+                if (!this.f) {
+                    this.f = new OneEuroFilter(t, v, this.minCutoff, this.beta);
+                    return v;
+                }
+                return this.f.filter(t, v);
+            }
+        }
+
+        // ═══════════════════════════════════════════════════════════════
+        // AR EARRING TRACKER
+        // ═══════════════════════════════════════════════════════════════
+        class AREarTracker {
+            constructor() {
+                this.earringL = new Image();
+                this.earringR = new Image();
+                this.earringL.src = '/static/earring.png';
+                
+                this.earringL.onload = () => {
+                    const canvas = document.createElement('canvas');
+                    canvas.width = this.earringL.width;
+                    canvas.height = this.earringL.height;
+                    const ctx = canvas.getContext('2d');
+                    ctx.scale(-1, 1);
+                    ctx.drawImage(this.earringL, -canvas.width, 0);
+                    this.earringR.src = canvas.toDataURL();
+                };
+
+                this.posL = new PointStabilizer(1.5, 0.5);
+                this.posR = new PointStabilizer(1.5, 0.5);
+                this.szL = new ScalarStabilizer(0.5, 0.05);
+                this.szR = new ScalarStabilizer(0.5, 0.05);
+                this.angleStab = new ScalarStabilizer(1.2, 0.3);
+                this.facehStab = new ScalarStabilizer(0.6, 0.05);
+
+                this.opacityL = 0.0;
+                this.opacityR = 0.0;
+                this.cacheL = null;
+                this.cacheR = null;
+                this.cacheAngle = 0.0;
+                this.t0 = performance.now() / 1000;
+            }
+
+            getTime() {
+                return performance.now() / 1000 - this.t0;
+            }
+
+            distance(p1, p2, w, h) {
+                const dx = (p1.x - p2.x) * w;
+                const dy = (p1.y - p2.y) * h;
+                return Math.sqrt(dx * dx + dy * dy);
+            }
+
+            visibility(lm, w, h) {
+                const nose = lm[NOSE];
+                const L = lm[LEFT_TRAG];
+                const R = lm[RIGHT_TRAG];
+                const ld = this.distance(L, nose, w, h);
+                const rd = this.distance(R, nose, w, h);
+                return [
+                    ld / (rd + 1e-6) > VIS_RATIO_THRESH,
+                    rd / (ld + 1e-6) > VIS_RATIO_THRESH
+                ];
+            }
+
+            headRollDeg(lm, w, h) {
+                const le = lm[LEFT_EYE_OUTER];
+                const re = lm[RIGHT_EYE_OUTER];
+                const dy = (re.y - le.y) * h;
+                const dx = (re.x - le.x) * w;
+                return Math.atan2(dy, dx) * 180 / Math.PI;
+            }
+
+            faceHeight(lm, w, h) {
+                return this.distance(lm[FOREHEAD], lm[CHIN], w, h);
+            }
+
+            yawFactors(lm, w, h) {
+                const nose = lm[NOSE];
+                const L = lm[LEFT_TRAG];
+                const R = lm[RIGHT_TRAG];
+                const ld = this.distance(L, nose, w, h);
+                const rd = this.distance(R, nose, w, h);
+                const s = ld + rd + 1e-6;
+                return [
+                    Math.max(0.4, Math.min(1.0, ld / s * 2.0)),
+                    Math.max(0.4, Math.min(1.0, rd / s * 2.0))
+                ];
+            }
+
+            estimateLobe(lm, baseId, refId, w, h) {
+                const base = lm[baseId];
+                const ref = lm[refId];
+                const dx = base.x - ref.x;
+                const dy = base.y - ref.y;
+                return [
+                    (base.x + dx * EARLOBE_OFFSET) * w,
+                    (base.y + dy * EARLOBE_OFFSET) * h
+                ];
+            }
+
+            overlay(ctx, earringImg, cx, cy, size, angleDeg, opacity) {
+                if (size < 4 || opacity < 0.01 || !earringImg.complete) return;
+
+                const aspect = earringImg.width / earringImg.height;
+                const nh = Math.max(Math.floor(size), 2);
+                const nw = Math.max(Math.floor(nh * aspect), 2);
+
+                ctx.save();
+                ctx.globalAlpha = opacity;
+                ctx.translate(cx, cy);
+                ctx.rotate((-angleDeg * TILT_DAMPING) * Math.PI / 180);
+                ctx.translate(-nw / 2, ANCHOR_Y_SHIFT * nh);
+                ctx.drawImage(earringImg, 0, 0, nw, nh);
+                ctx.restore();
+            }
+
+            process(ctx, results, w, h) {
+                const t = this.getTime();
+
+                if (!results.faceLandmarks || results.faceLandmarks.length === 0) {
+                    this.opacityL = Math.max(0.0, this.opacityL - FADE_SPEED);
+                    this.opacityR = Math.max(0.0, this.opacityR - FADE_SPEED);
+                    
+                    if (this.cacheL && this.opacityL > 0.01) {
+                        this.overlay(ctx, this.earringL, ...this.cacheL, this.cacheAngle, this.opacityL);
+                    }
+                    if (this.cacheR && this.opacityR > 0.01) {
+                        this.overlay(ctx, this.earringR, ...this.cacheR, this.cacheAngle, this.opacityR);
+                    }
+                    return;
+                }
+
+                const lm = results.faceLandmarks[0];
+                const [showL, showR] = this.visibility(lm, w, h);
+
+                const fh = this.facehStab.update(t, this.faceHeight(lm, w, h));
+                const angle = this.angleStab.update(t, this.headRollDeg(lm, w, h));
+                const [lf, rf] = this.yawFactors(lm, w, h);
+                const baseSz = fh * EARRING_SIZE_RATIO;
+
+                // LEFT earring
+                if (showL) {
+                    let [x, y] = this.estimateLobe(lm, LEFT_BASE, LEFT_REF, w, h);
+                    [x, y] = this.posL.update(t, x, y);
+                    const sz = this.szL.update(t, baseSz * lf);
+                    this.opacityL = Math.min(1.0, this.opacityL + FADE_SPEED);
+                    this.cacheL = [x, y, sz];
+                } else {
+                    this.opacityL = Math.max(0.0, this.opacityL - FADE_SPEED);
+                }
+
+                if (this.cacheL && this.opacityL > 0.01) {
+                    this.overlay(ctx, this.earringL, ...this.cacheL, angle, this.opacityL);
+                }
+
+                // RIGHT earring
+                if (showR) {
+                    let [x, y] = this.estimateLobe(lm, RIGHT_BASE, RIGHT_REF, w, h);
+                    [x, y] = this.posR.update(t, x, y);
+                    const sz = this.szR.update(t, baseSz * rf);
+                    this.opacityR = Math.min(1.0, this.opacityR + FADE_SPEED);
+                    this.cacheR = [x, y, sz];
+                } else {
+                    this.opacityR = Math.max(0.0, this.opacityR - FADE_SPEED);
+                }
+
+                if (this.cacheR && this.opacityR > 0.01) {
+                    this.overlay(ctx, this.earringR, ...this.cacheR, angle, this.opacityR);
+                }
+
+                this.cacheAngle = angle;
+            }
+        }
+
+        // ═══════════════════════════════════════════════════════════════
+        // MAIN APP
+        // ═══════════════════════════════════════════════════════════════
         const video = document.getElementById('videoElement');
         const canvas = document.getElementById('canvas');
         const ctx = canvas.getContext('2d');
@@ -172,39 +386,18 @@
         const stopButton = document.getElementById('stopButton');
         const status = document.getElementById('status');
         const loading = document.getElementById('loading');
-        
-        let faceLandmarker;
-        let stream = null;
-        let animationId = null;
-        let earringImage = new Image();
+
+        let faceLandmarker, stream = null, animationId = null;
+        let tracker = new AREarTracker();
         let lastVideoTime = -1;
 
-        // Landmark indices
-        const LEFT_EAR_BASE = 234;
-        const RIGHT_EAR_BASE = 454;
-        const NOSE = 1;
-        const LEFT_EYE_OUTER = 33;
-        const RIGHT_EYE_OUTER = 263;
-        const FOREHEAD = 10;
-        const CHIN = 152;
-
-        // Load earring image
-        earringImage.src = '/static/earring.png';
-        earringImage.onerror = () => {
-            console.error('Failed to load earring image');
-            status.textContent = 'Error: Could not load earring image';
-        };
-
-        // Initialize MediaPipe
         async function initializeMediaPipe() {
             loading.classList.add('active');
-            status.textContent = 'Loading MediaPipe Face Landmarker...';
-            
+            status.textContent = 'Loading MediaPipe...';
             try {
                 const vision = await FilesetResolver.forVisionTasks(
                     "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm"
                 );
-                
                 faceLandmarker = await FaceLandmarker.createFromOptions(vision, {
                     baseOptions: {
                         modelAssetPath: "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
@@ -212,117 +405,50 @@
                     },
                     runningMode: "VIDEO",
                     numFaces: 1,
-                    minFaceDetectionConfidence: 0.5,
-                    minFacePresenceConfidence: 0.5,
-                    minTrackingConfidence: 0.5,
-                    outputFaceBlendshapes: false,
-                    outputFacialTransformationMatrixes: false
+                    minFaceDetectionConfidence: 0.7,
+                    minFacePresenceConfidence: 0.7,
+                    minTrackingConfidence: 0.7
                 });
-                
                 loading.classList.remove('active');
-                status.textContent = 'MediaPipe loaded! Click "Start Camera" to begin';
+                status.textContent = 'Ready! Click "Start Camera"';
                 startButton.disabled = false;
             } catch (error) {
-                console.error('Error initializing MediaPipe:', error);
+                console.error('Error:', error);
                 loading.classList.remove('active');
-                status.textContent = 'Error loading MediaPipe. Please refresh the page.';
+                status.textContent = 'Error loading MediaPipe';
             }
         }
 
-        startButton.addEventListener('click', startCamera);
-        stopButton.addEventListener('click', stopCamera);
-
         async function startCamera() {
             try {
-                status.textContent = 'Requesting camera access...';
-                stream = await navigator.mediaDevices.getUserMedia({ 
-                    video: { 
-                        width: { ideal: 1280 },
-                        height: { ideal: 720 },
-                        facingMode: 'user'
-                    } 
+                status.textContent = 'Requesting camera...';
+                stream = await navigator.mediaDevices.getUserMedia({
+                    video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: 'user' }
                 });
-                
                 video.srcObject = stream;
                 video.addEventListener('loadeddata', () => {
                     canvas.width = video.videoWidth;
                     canvas.height = video.videoHeight;
                     startButton.disabled = true;
                     stopButton.disabled = false;
-                    status.textContent = 'Camera active - Try on earrings!';
+                    status.textContent = 'Camera active!';
                     processFrame();
                 });
             } catch (err) {
-                console.error('Error accessing camera:', err);
-                status.textContent = 'Error: Could not access camera. Please allow camera permissions.';
+                console.error('Camera error:', err);
+                status.textContent = 'Camera access denied';
             }
         }
 
         function stopCamera() {
-            if (animationId) {
-                cancelAnimationFrame(animationId);
-                animationId = null;
-            }
-            
-            if (stream) {
-                stream.getTracks().forEach(track => track.stop());
-                stream = null;
-            }
-            
+            if (animationId) cancelAnimationFrame(animationId);
+            if (stream) stream.getTracks().forEach(t => t.stop());
             video.srcObject = null;
             ctx.clearRect(0, 0, canvas.width, canvas.height);
-            
             startButton.disabled = false;
             stopButton.disabled = true;
             status.textContent = 'Camera stopped';
             lastVideoTime = -1;
-        }
-
-        function calculateDistance(p1, p2) {
-            return Math.sqrt(Math.pow(p2.x - p1.x, 2) + Math.pow(p2.y - p1.y, 2));
-        }
-
-        function calculateAngle(p1, p2) {
-            return Math.atan2(p2.y - p1.y, p2.x - p1.x) * 180 / Math.PI;
-        }
-
-        function drawEarring(landmark, isLeft) {
-            if (!earringImage.complete) return;
-            
-            const x = landmark.x * canvas.width;
-            const y = landmark.y * canvas.height;
-            
-            // Calculate face height for sizing
-            const forehead = faceLandmarker.lastResults.faceLandmarks[0][FOREHEAD];
-            const chin = faceLandmarker.lastResults.faceLandmarks[0][CHIN];
-            const faceHeight = calculateDistance(forehead, chin) * canvas.height;
-            
-            // Calculate head tilt
-            const leftEye = faceLandmarker.lastResults.faceLandmarks[0][LEFT_EYE_OUTER];
-            const rightEye = faceLandmarker.lastResults.faceLandmarks[0][RIGHT_EYE_OUTER];
-            const angle = calculateAngle(leftEye, rightEye);
-            
-            // Earring size
-            const earringHeight = faceHeight * 0.25;
-            const earringWidth = earringHeight * (earringImage.width / earringImage.height);
-            
-            ctx.save();
-            ctx.translate(x, y);
-            ctx.rotate(angle * Math.PI / 180 * 0.35); // Damped rotation
-            
-            if (isLeft) {
-                ctx.scale(-1, 1); // Mirror for left ear
-            }
-            
-            ctx.drawImage(
-                earringImage,
-                -earringWidth / 2,
-                0,
-                earringWidth,
-                earringHeight
-            );
-            
-            ctx.restore();
         }
 
         function processFrame() {
@@ -334,40 +460,17 @@
             const currentTime = video.currentTime;
             if (currentTime !== lastVideoTime) {
                 lastVideoTime = currentTime;
-                
-                // Clear canvas
                 ctx.clearRect(0, 0, canvas.width, canvas.height);
                 
-                // Detect faces
                 const results = faceLandmarker.detectForVideo(video, performance.now());
-                faceLandmarker.lastResults = results;
-                
-                if (results.faceLandmarks && results.faceLandmarks.length > 0) {
-                    const landmarks = results.faceLandmarks[0];
-                    
-                    // Check visibility based on nose-to-ear distance
-                    const nose = landmarks[NOSE];
-                    const leftEar = landmarks[LEFT_EAR_BASE];
-                    const rightEar = landmarks[RIGHT_EAR_BASE];
-                    
-                    const leftDist = calculateDistance(nose, leftEar);
-                    const rightDist = calculateDistance(nose, rightEar);
-                    const ratio = 0.75;
-                    
-                    // Draw earrings
-                    if (leftDist / rightDist > ratio) {
-                        drawEarring(leftEar, true);
-                    }
-                    if (rightDist / leftDist > ratio) {
-                        drawEarring(rightEar, false);
-                    }
-                }
+                tracker.process(ctx, results, canvas.width, canvas.height);
             }
             
             animationId = requestAnimationFrame(processFrame);
         }
 
-        // Initialize on page load
+        startButton.addEventListener('click', startCamera);
+        stopButton.addEventListener('click', stopCamera);
         startButton.disabled = true;
         initializeMediaPipe();
     </script>
