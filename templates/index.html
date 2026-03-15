@@ -46,19 +46,20 @@
             background: #000;
         }
         
-        #videoElement, #canvas {
+        #videoElement {
             width: 100%;
             height: auto;
             display: block;
+            transform: scaleX(-1);
         }
         
         #canvas {
-            display: none;
-        }
-        
-        #processedImage {
+            position: absolute;
+            top: 0;
+            left: 0;
             width: 100%;
-            border-radius: 15px;
+            height: 100%;
+            transform: scaleX(-1);
         }
         
         .controls {
@@ -84,7 +85,7 @@
             color: white;
         }
         
-        #startButton:hover {
+        #startButton:hover:not(:disabled) {
             background: #5568d3;
             transform: translateY(-2px);
             box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4);
@@ -95,7 +96,7 @@
             color: white;
         }
         
-        #stopButton:hover {
+        #stopButton:hover:not(:disabled) {
             background: #e53e3e;
             transform: translateY(-2px);
             box-shadow: 0 5px 15px rgba(245, 101, 101, 0.4);
@@ -104,7 +105,6 @@
         button:disabled {
             opacity: 0.5;
             cursor: not-allowed;
-            transform: none !important;
         }
         
         .status {
@@ -147,7 +147,6 @@
         <div class="video-container">
             <video id="videoElement" autoplay playsinline></video>
             <canvas id="canvas"></canvas>
-            <img id="processedImage" style="display: none;">
         </div>
         
         <div class="controls">
@@ -159,23 +158,76 @@
         
         <div class="loading" id="loading">
             <div class="spinner"></div>
-            <p>Processing...</p>
+            <p>Loading MediaPipe...</p>
         </div>
     </div>
 
-    <script>
+    <script type="module">
+        import { FaceLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
+
         const video = document.getElementById('videoElement');
         const canvas = document.getElementById('canvas');
         const ctx = canvas.getContext('2d');
-        const processedImage = document.getElementById('processedImage');
         const startButton = document.getElementById('startButton');
         const stopButton = document.getElementById('stopButton');
         const status = document.getElementById('status');
         const loading = document.getElementById('loading');
         
+        let faceLandmarker;
         let stream = null;
-        let processing = false;
         let animationId = null;
+        let earringImage = new Image();
+        let lastVideoTime = -1;
+
+        // Landmark indices
+        const LEFT_EAR_BASE = 234;
+        const RIGHT_EAR_BASE = 454;
+        const NOSE = 1;
+        const LEFT_EYE_OUTER = 33;
+        const RIGHT_EYE_OUTER = 263;
+        const FOREHEAD = 10;
+        const CHIN = 152;
+
+        // Load earring image
+        earringImage.src = '/static/earring.png';
+        earringImage.onerror = () => {
+            console.error('Failed to load earring image');
+            status.textContent = 'Error: Could not load earring image';
+        };
+
+        // Initialize MediaPipe
+        async function initializeMediaPipe() {
+            loading.classList.add('active');
+            status.textContent = 'Loading MediaPipe Face Landmarker...';
+            
+            try {
+                const vision = await FilesetResolver.forVisionTasks(
+                    "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm"
+                );
+                
+                faceLandmarker = await FaceLandmarker.createFromOptions(vision, {
+                    baseOptions: {
+                        modelAssetPath: "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
+                        delegate: "GPU"
+                    },
+                    runningMode: "VIDEO",
+                    numFaces: 1,
+                    minFaceDetectionConfidence: 0.5,
+                    minFacePresenceConfidence: 0.5,
+                    minTrackingConfidence: 0.5,
+                    outputFaceBlendshapes: false,
+                    outputFacialTransformationMatrixes: false
+                });
+                
+                loading.classList.remove('active');
+                status.textContent = 'MediaPipe loaded! Click "Start Camera" to begin';
+                startButton.disabled = false;
+            } catch (error) {
+                console.error('Error initializing MediaPipe:', error);
+                loading.classList.remove('active');
+                status.textContent = 'Error loading MediaPipe. Please refresh the page.';
+            }
+        }
 
         startButton.addEventListener('click', startCamera);
         stopButton.addEventListener('click', stopCamera);
@@ -192,15 +244,14 @@
                 });
                 
                 video.srcObject = stream;
-                video.style.display = 'block';
-                processedImage.style.display = 'none';
-                
-                startButton.disabled = true;
-                stopButton.disabled = false;
-                status.textContent = 'Camera active - Processing frames...';
-                
-                processing = true;
-                processFrame();
+                video.addEventListener('loadeddata', () => {
+                    canvas.width = video.videoWidth;
+                    canvas.height = video.videoHeight;
+                    startButton.disabled = true;
+                    stopButton.disabled = false;
+                    status.textContent = 'Camera active - Try on earrings!';
+                    processFrame();
+                });
             } catch (err) {
                 console.error('Error accessing camera:', err);
                 status.textContent = 'Error: Could not access camera. Please allow camera permissions.';
@@ -208,10 +259,9 @@
         }
 
         function stopCamera() {
-            processing = false;
-            
             if (animationId) {
                 cancelAnimationFrame(animationId);
+                animationId = null;
             }
             
             if (stream) {
@@ -220,48 +270,106 @@
             }
             
             video.srcObject = null;
-            video.style.display = 'block';
-            processedImage.style.display = 'none';
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
             
             startButton.disabled = false;
             stopButton.disabled = true;
             status.textContent = 'Camera stopped';
-            loading.classList.remove('active');
+            lastVideoTime = -1;
         }
 
-        async function processFrame() {
-            if (!processing) return;
+        function calculateDistance(p1, p2) {
+            return Math.sqrt(Math.pow(p2.x - p1.x, 2) + Math.pow(p2.y - p1.y, 2));
+        }
+
+        function calculateAngle(p1, p2) {
+            return Math.atan2(p2.y - p1.y, p2.x - p1.x) * 180 / Math.PI;
+        }
+
+        function drawEarring(landmark, isLeft) {
+            if (!earringImage.complete) return;
             
-            if (video.readyState === video.HAVE_ENOUGH_DATA) {
-                canvas.width = video.videoWidth;
-                canvas.height = video.videoHeight;
-                ctx.drawImage(video, 0, 0);
+            const x = landmark.x * canvas.width;
+            const y = landmark.y * canvas.height;
+            
+            // Calculate face height for sizing
+            const forehead = faceLandmarker.lastResults.faceLandmarks[0][FOREHEAD];
+            const chin = faceLandmarker.lastResults.faceLandmarks[0][CHIN];
+            const faceHeight = calculateDistance(forehead, chin) * canvas.height;
+            
+            // Calculate head tilt
+            const leftEye = faceLandmarker.lastResults.faceLandmarks[0][LEFT_EYE_OUTER];
+            const rightEye = faceLandmarker.lastResults.faceLandmarks[0][RIGHT_EYE_OUTER];
+            const angle = calculateAngle(leftEye, rightEye);
+            
+            // Earring size
+            const earringHeight = faceHeight * 0.25;
+            const earringWidth = earringHeight * (earringImage.width / earringImage.height);
+            
+            ctx.save();
+            ctx.translate(x, y);
+            ctx.rotate(angle * Math.PI / 180 * 0.35); // Damped rotation
+            
+            if (isLeft) {
+                ctx.scale(-1, 1); // Mirror for left ear
+            }
+            
+            ctx.drawImage(
+                earringImage,
+                -earringWidth / 2,
+                0,
+                earringWidth,
+                earringHeight
+            );
+            
+            ctx.restore();
+        }
+
+        function processFrame() {
+            if (!faceLandmarker || !video.videoWidth) {
+                animationId = requestAnimationFrame(processFrame);
+                return;
+            }
+
+            const currentTime = video.currentTime;
+            if (currentTime !== lastVideoTime) {
+                lastVideoTime = currentTime;
                 
-                const imageData = canvas.toDataURL('image/jpeg', 0.8);
+                // Clear canvas
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
                 
-                try {
-                    const response = await fetch('/process_frame', {
-                        method: 'POST',
-                        headers: {
-                            'Content-Type': 'application/json',
-                        },
-                        body: JSON.stringify({ image: imageData })
-                    });
+                // Detect faces
+                const results = faceLandmarker.detectForVideo(video, performance.now());
+                faceLandmarker.lastResults = results;
+                
+                if (results.faceLandmarks && results.faceLandmarks.length > 0) {
+                    const landmarks = results.faceLandmarks[0];
                     
-                    const data = await response.json();
+                    // Check visibility based on nose-to-ear distance
+                    const nose = landmarks[NOSE];
+                    const leftEar = landmarks[LEFT_EAR_BASE];
+                    const rightEar = landmarks[RIGHT_EAR_BASE];
                     
-                    if (data.image) {
-                        processedImage.src = data.image;
-                        video.style.display = 'none';
-                        processedImage.style.display = 'block';
+                    const leftDist = calculateDistance(nose, leftEar);
+                    const rightDist = calculateDistance(nose, rightEar);
+                    const ratio = 0.75;
+                    
+                    // Draw earrings
+                    if (leftDist / rightDist > ratio) {
+                        drawEarring(leftEar, true);
                     }
-                } catch (err) {
-                    console.error('Error processing frame:', err);
+                    if (rightDist / leftDist > ratio) {
+                        drawEarring(rightEar, false);
+                    }
                 }
             }
             
             animationId = requestAnimationFrame(processFrame);
         }
+
+        // Initialize on page load
+        startButton.disabled = true;
+        initializeMediaPipe();
     </script>
 </body>
 </html>
