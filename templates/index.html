@@ -422,21 +422,58 @@
         async function startCamera() {
             try {
                 status.textContent = 'Requesting camera...';
-                stream = await navigator.mediaDevices.getUserMedia({
-                    video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: 'user' }
-                });
+                
+                // Try 60fps first at various resolutions, then fallback to 30fps
+                const constraints = [
+                    { width: 1920, height: 1080, frameRate: 60 },
+                    { width: 1280, height: 720, frameRate: 60 },
+                    { width: 960, height: 540, frameRate: 60 },
+                    { width: 640, height: 480, frameRate: 60 },
+                    { width: 640, height: 360, frameRate: 60 },
+                    { width: 1920, height: 1080, frameRate: 30 },
+                    { width: 1280, height: 720, frameRate: 30 },
+                    { width: 960, height: 540, frameRate: 30 },
+                    { width: 640, height: 480, frameRate: 30 }
+                ];
+
+                let streamAcquired = false;
+                for (const constraint of constraints) {
+                    try {
+                        stream = await navigator.mediaDevices.getUserMedia({
+                            video: {
+                                width: { ideal: constraint.width },
+                                height: { ideal: constraint.height },
+                                frameRate: { ideal: constraint.frameRate },
+                                facingMode: 'user'
+                            }
+                        });
+                        
+                        const track = stream.getVideoTracks()[0];
+                        const settings = track.getSettings();
+                        console.log(`Camera started: ${settings.width}x${settings.height}@${settings.frameRate}fps`);
+                        status.textContent = `Camera: ${settings.width}x${settings.height}@${settings.frameRate}fps`;
+                        streamAcquired = true;
+                        break;
+                    } catch (err) {
+                        console.log(`Failed ${constraint.width}x${constraint.height}@${constraint.frameRate}fps, trying next...`);
+                    }
+                }
+
+                if (!streamAcquired) {
+                    throw new Error('No compatible camera configuration found');
+                }
+
                 video.srcObject = stream;
                 video.addEventListener('loadeddata', () => {
                     canvas.width = video.videoWidth;
                     canvas.height = video.videoHeight;
                     startButton.disabled = true;
                     stopButton.disabled = false;
-                    status.textContent = 'Camera active!';
                     processFrame();
                 });
             } catch (err) {
                 console.error('Camera error:', err);
-                status.textContent = 'Camera access denied';
+                status.textContent = 'Camera access denied or not available';
             }
         }
 
