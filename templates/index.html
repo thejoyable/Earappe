@@ -140,73 +140,81 @@
         const ANCHOR_Y_SHIFT = 0.0;
 
         // ═══════════════════════════════════════════════════════════════
-        // ONE EURO FILTER
+        // ONE EURO FILTER  –  adaptive low-pass used by Snap / IG
+        //
+        // • Low speed → heavy smoothing (kills jitter)
+        // • High speed → light smoothing (kills lag)
+        // Reference: Casiez et al., "1€ Filter", CHI 2012
         // ═══════════════════════════════════════════════════════════════
         class OneEuroFilter {
-            constructor(t0, x0, minCutoff = 1.0, beta = 0.007, dCutoff = 1.0) {
-                this.minCutoff = minCutoff;
-                this.beta = beta;
-                this.dCutoff = dCutoff;
-                this.xPrev = x0;
-                this.dxPrev = 0.0;
-                this.tPrev = t0;
+            constructor(t0, x0, min_cutoff = 1.0, beta = 0.007, d_cutoff = 1.0) {
+                this.min_cutoff = min_cutoff;  // Hz – lower = smoother when still
+                this.beta = beta;               // speed coefficient – higher = less lag when fast
+                this.d_cutoff = d_cutoff;       // Hz – derivative smoothing
+                this.x_prev = parseFloat(x0);
+                this.dx_prev = 0.0;
+                this.t_prev = t0;
             }
 
-            static alpha(te, cutoff) {
+            // ── smoothing factor from cutoff frequency ──
+            static _alpha(te, cutoff) {
                 const r = 2.0 * Math.PI * cutoff * te;
                 return r / (r + 1.0);
             }
 
             filter(t, x) {
-                let te = t - this.tPrev;
+                let te = t - this.t_prev;
                 if (te < 1e-9) te = 1e-6;
 
-                const ad = OneEuroFilter.alpha(te, this.dCutoff);
-                const dx = (x - this.xPrev) / te;
-                const dxHat = ad * dx + (1.0 - ad) * this.dxPrev;
+                // smoothed derivative
+                const ad = OneEuroFilter._alpha(te, this.d_cutoff);
+                const dx = (x - this.x_prev) / te;
+                const dx_hat = ad * dx + (1.0 - ad) * this.dx_prev;
 
-                const cutoff = this.minCutoff + this.beta * Math.abs(dxHat);
-                const a = OneEuroFilter.alpha(te, cutoff);
-                const xHat = a * x + (1.0 - a) * this.xPrev;
+                // adaptive cutoff: faster movement → higher cutoff → less smoothing
+                const cutoff = this.min_cutoff + this.beta * Math.abs(dx_hat);
+                const a = OneEuroFilter._alpha(te, cutoff);
+                const x_hat = a * x + (1.0 - a) * this.x_prev;
 
-                this.xPrev = xHat;
-                this.dxPrev = dxHat;
-                this.tPrev = t;
-                return xHat;
+                this.x_prev = x_hat;
+                this.dx_prev = dx_hat;
+                this.t_prev = t;
+                return x_hat;
             }
         }
 
+        // ── convenience wrappers ──
         class PointStabilizer {
-            constructor(minCutoff = 1.0, beta = 0.007) {
-                this.fx = null;
-                this.fy = null;
-                this.minCutoff = minCutoff;
-                this.beta = beta;
+            /** Dual One-Euro filters for a 2-D point. */
+            constructor(min_cutoff = 1.0, beta = 0.007, d_cutoff = 1.0) {
+                this._fx = null;
+                this._fy = null;
+                this._kw = { min_cutoff, beta, d_cutoff };
             }
 
             update(t, x, y) {
-                if (!this.fx) {
-                    this.fx = new OneEuroFilter(t, x, this.minCutoff, this.beta);
-                    this.fy = new OneEuroFilter(t, y, this.minCutoff, this.beta);
+                if (this._fx === null) {
+                    this._fx = new OneEuroFilter(t, x, this._kw.min_cutoff, this._kw.beta, this._kw.d_cutoff);
+                    this._fy = new OneEuroFilter(t, y, this._kw.min_cutoff, this._kw.beta, this._kw.d_cutoff);
                     return [x, y];
                 }
-                return [this.fx.filter(t, x), this.fy.filter(t, y)];
+                return [this._fx.filter(t, x), this._fy.filter(t, y)];
             }
         }
 
         class ScalarStabilizer {
-            constructor(minCutoff = 1.0, beta = 0.007) {
-                this.f = null;
-                this.minCutoff = minCutoff;
-                this.beta = beta;
+            /** Single One-Euro filter for a scalar. */
+            constructor(min_cutoff = 1.0, beta = 0.007, d_cutoff = 1.0) {
+                this._f = null;
+                this._kw = { min_cutoff, beta, d_cutoff };
             }
 
             update(t, v) {
-                if (!this.f) {
-                    this.f = new OneEuroFilter(t, v, this.minCutoff, this.beta);
+                if (this._f === null) {
+                    this._f = new OneEuroFilter(t, v, this._kw.min_cutoff, this._kw.beta, this._kw.d_cutoff);
                     return v;
                 }
-                return this.f.filter(t, v);
+                return this._f.filter(t, v);
             }
         }
 
@@ -215,58 +223,69 @@
         // ═══════════════════════════════════════════════════════════════
         class AREarTracker {
             constructor() {
-                this.earringL = new Image();
-                this.earringR = new Image();
-                this.earringL.src = '/static/earring.png';
+                // ── load earring images ──
+                this.earring_L = new Image();
+                this.earring_R = new Image();
+                this.earring_L.src = '/static/earring.png';
                 
-                this.earringL.onload = () => {
+                // mirror for right side
+                this.earring_L.onload = () => {
                     const canvas = document.createElement('canvas');
-                    canvas.width = this.earringL.width;
-                    canvas.height = this.earringL.height;
+                    canvas.width = this.earring_L.width;
+                    canvas.height = this.earring_L.height;
                     const ctx = canvas.getContext('2d');
                     ctx.scale(-1, 1);
-                    ctx.drawImage(this.earringL, -canvas.width, 0);
-                    this.earringR.src = canvas.toDataURL();
+                    ctx.drawImage(this.earring_L, -canvas.width, 0);
+                    this.earring_R.src = canvas.toDataURL();
                 };
 
-                this.posL = new PointStabilizer(1.5, 0.5);
-                this.posR = new PointStabilizer(1.5, 0.5);
-                this.szL = new ScalarStabilizer(0.5, 0.05);
-                this.szR = new ScalarStabilizer(0.5, 0.05);
-                this.angleStab = new ScalarStabilizer(1.2, 0.3);
-                this.facehStab = new ScalarStabilizer(0.6, 0.05);
+                // ── per-ear stabilizers ──
+                // position – responsive, low lag
+                this.pos_L = new PointStabilizer(1.5, 0.5);
+                this.pos_R = new PointStabilizer(1.5, 0.5);
+                // size – heavier smoothing (size shouldn't jitter)
+                this.sz_L = new ScalarStabilizer(0.5, 0.05);
+                this.sz_R = new ScalarStabilizer(0.5, 0.05);
 
-                this.opacityL = 0.0;
-                this.opacityR = 0.0;
-                this.cacheL = null;
-                this.cacheR = null;
-                this.cacheAngle = 0.0;
+                // ── global stabilizers ──
+                this.angle_stab = new ScalarStabilizer(1.2, 0.3);
+                this.faceh_stab = new ScalarStabilizer(0.6, 0.05);
+
+                // ── fade state ──
+                this.opacity_L = 0.0;
+                this.opacity_R = 0.0;
+                this.cache_L = null;      // (x, y, sz)
+                this.cache_R = null;
+                this.cache_angle = 0.0;
                 this.t0 = performance.now() / 1000;
             }
 
-            getTime() {
+            // ─────────────────── helpers ───────────────────
+            _t() {
                 return performance.now() / 1000 - this.t0;
             }
 
-            distance(p1, p2, w, h) {
-                const dx = (p1.x - p2.x) * w;
-                const dy = (p1.y - p2.y) * h;
-                return Math.sqrt(dx * dx + dy * dy);
-            }
-
-            visibility(lm, w, h) {
+            _visibility(lm, w, h) {
+                /** Which ears are geometrically visible (not occluded by head turn). */
                 const nose = lm[NOSE];
                 const L = lm[LEFT_TRAG];
                 const R = lm[RIGHT_TRAG];
-                const ld = this.distance(L, nose, w, h);
-                const rd = this.distance(R, nose, w, h);
+                const ld = this._distance(L, nose, w, h);
+                const rd = this._distance(R, nose, w, h);
                 return [
                     ld / (rd + 1e-6) > VIS_RATIO_THRESH,
                     rd / (ld + 1e-6) > VIS_RATIO_THRESH
                 ];
             }
 
-            headRollDeg(lm, w, h) {
+            _distance(p1, p2, w, h) {
+                const dx = (p1.x - p2.x) * w;
+                const dy = (p1.y - p2.y) * h;
+                return Math.sqrt(dx * dx + dy * dy);
+            }
+
+            _head_roll_deg(lm, w, h) {
+                /** Roll angle from outer eye corners (degrees). */
                 const le = lm[LEFT_EYE_OUTER];
                 const re = lm[RIGHT_EYE_OUTER];
                 const dy = (re.y - le.y) * h;
@@ -274,16 +293,22 @@
                 return Math.atan2(dy, dx) * 180 / Math.PI;
             }
 
-            faceHeight(lm, w, h) {
-                return this.distance(lm[FOREHEAD], lm[CHIN], w, h);
+            _face_height(lm, w, h) {
+                /** Euclidean distance forehead → chin (pixels). */
+                return this._distance(lm[FOREHEAD], lm[CHIN], w, h);
             }
 
-            yawFactors(lm, w, h) {
+            _yaw_factors(lm, w, h) {
+                /**
+                 * Per-ear scale multiplier driven by face yaw.
+                 * Frontal → 1.0 ; turned away → shrinks to 0.4
+                 * Gives a natural perspective / foreshortening effect.
+                 */
                 const nose = lm[NOSE];
                 const L = lm[LEFT_TRAG];
                 const R = lm[RIGHT_TRAG];
-                const ld = this.distance(L, nose, w, h);
-                const rd = this.distance(R, nose, w, h);
+                const ld = this._distance(L, nose, w, h);
+                const rd = this._distance(R, nose, w, h);
                 const s = ld + rd + 1e-6;
                 return [
                     Math.max(0.4, Math.min(1.0, ld / s * 2.0)),
@@ -291,88 +316,104 @@
                 ];
             }
 
-            estimateLobe(lm, baseId, refId, w, h) {
-                const base = lm[baseId];
-                const ref = lm[refId];
-                const dx = base.x - ref.x;
-                const dy = base.y - ref.y;
-                return [
-                    (base.x + dx * EARLOBE_OFFSET) * w,
-                    (base.y + dy * EARLOBE_OFFSET) * h
-                ];
+            _estimate_lobe(lm, base_id, ref_id, w, h) {
+                /**
+                 * Project from a jaw-contour landmark outward along the
+                 * jaw → ear direction to estimate the earlobe position.
+                 */
+                const bx = lm[base_id].x;
+                const by = lm[base_id].y;
+                const dx = bx - lm[ref_id].x;
+                const dy = by - lm[ref_id].y;
+                const px = bx + dx * EARLOBE_OFFSET;
+                const py = by + dy * EARLOBE_OFFSET;
+                return [px * w, py * h];
             }
 
-            overlay(ctx, earringImg, cx, cy, size, angleDeg, opacity) {
-                if (size < 4 || opacity < 0.01 || !earringImg.complete) return;
+            // ─────────────────── overlay ───────────────────
+            _overlay(ctx, earring_src, cx, cy, size, angle_deg, opacity) {
+                /**
+                 * Composite an earring onto the canvas with:
+                 * • correct sizing
+                 * • rotation about the attachment point (top-centre + ANCHOR_Y_SHIFT)
+                 * • alpha blending scaled by current opacity
+                 */
+                if (size < 4 || opacity < 0.01 || !earring_src.complete) return;
 
-                const aspect = earringImg.width / earringImg.height;
+                const aspect = earring_src.width / earring_src.height;
                 const nh = Math.max(Math.floor(size), 2);
                 const nw = Math.max(Math.floor(nh * aspect), 2);
+
+                // attachment point = top-centre shifted down by ANCHOR_Y_SHIFT
+                const angle_applied = angle_deg * TILT_DAMPING;  // gravity damping
 
                 ctx.save();
                 ctx.globalAlpha = opacity;
                 ctx.translate(cx, cy);
-                ctx.rotate((-angleDeg * TILT_DAMPING) * Math.PI / 180);
+                ctx.rotate((-angle_applied) * Math.PI / 180);
                 ctx.translate(-nw / 2, ANCHOR_Y_SHIFT * nh);
-                ctx.drawImage(earringImg, 0, 0, nw, nh);
+                ctx.drawImage(earring_src, 0, 0, nw, nh);
                 ctx.restore();
             }
 
+            // ─────────────────── per-frame entry point ───────────────────
             process(ctx, results, w, h) {
-                const t = this.getTime();
+                const t = this._t();
 
+                // ── no face: fade both earrings out gracefully ──
                 if (!results.faceLandmarks || results.faceLandmarks.length === 0) {
-                    this.opacityL = Math.max(0.0, this.opacityL - FADE_SPEED);
-                    this.opacityR = Math.max(0.0, this.opacityR - FADE_SPEED);
+                    this.opacity_L = Math.max(0.0, this.opacity_L - FADE_SPEED);
+                    this.opacity_R = Math.max(0.0, this.opacity_R - FADE_SPEED);
                     
-                    if (this.cacheL && this.opacityL > 0.01) {
-                        this.overlay(ctx, this.earringL, ...this.cacheL, this.cacheAngle, this.opacityL);
+                    if (this.cache_L && this.opacity_L > 0.01) {
+                        this._overlay(ctx, this.earring_L, ...this.cache_L, this.cache_angle, this.opacity_L);
                     }
-                    if (this.cacheR && this.opacityR > 0.01) {
-                        this.overlay(ctx, this.earringR, ...this.cacheR, this.cacheAngle, this.opacityR);
+                    if (this.cache_R && this.opacity_R > 0.01) {
+                        this._overlay(ctx, this.earring_R, ...this.cache_R, this.cache_angle, this.opacity_R);
                     }
                     return;
                 }
 
                 const lm = results.faceLandmarks[0];
-                const [showL, showR] = this.visibility(lm, w, h);
+                const [show_L, show_R] = this._visibility(lm, w, h);
 
-                const fh = this.facehStab.update(t, this.faceHeight(lm, w, h));
-                const angle = this.angleStab.update(t, this.headRollDeg(lm, w, h));
-                const [lf, rf] = this.yawFactors(lm, w, h);
-                const baseSz = fh * EARRING_SIZE_RATIO;
+                // ── face-wide metrics (stabilised) ──
+                const fh = this.faceh_stab.update(t, this._face_height(lm, w, h));
+                const angle = this.angle_stab.update(t, this._head_roll_deg(lm, w, h));
+                const [lf, rf] = this._yaw_factors(lm, w, h);
+                const base_sz = fh * EARRING_SIZE_RATIO;
 
-                // LEFT earring
-                if (showL) {
-                    let [x, y] = this.estimateLobe(lm, LEFT_BASE, LEFT_REF, w, h);
-                    [x, y] = this.posL.update(t, x, y);
-                    const sz = this.szL.update(t, baseSz * lf);
-                    this.opacityL = Math.min(1.0, this.opacityL + FADE_SPEED);
-                    this.cacheL = [x, y, sz];
+                // ── LEFT earring ──
+                if (show_L) {
+                    let [x, y] = this._estimate_lobe(lm, LEFT_BASE, LEFT_REF, w, h);
+                    [x, y] = this.pos_L.update(t, x, y);
+                    const sz = this.sz_L.update(t, base_sz * lf);
+                    this.opacity_L = Math.min(1.0, this.opacity_L + FADE_SPEED);
+                    this.cache_L = [x, y, sz];
                 } else {
-                    this.opacityL = Math.max(0.0, this.opacityL - FADE_SPEED);
+                    this.opacity_L = Math.max(0.0, this.opacity_L - FADE_SPEED);
                 }
 
-                if (this.cacheL && this.opacityL > 0.01) {
-                    this.overlay(ctx, this.earringL, ...this.cacheL, angle, this.opacityL);
+                if (this.cache_L && this.opacity_L > 0.01) {
+                    this._overlay(ctx, this.earring_L, ...this.cache_L, angle, this.opacity_L);
                 }
 
-                // RIGHT earring
-                if (showR) {
-                    let [x, y] = this.estimateLobe(lm, RIGHT_BASE, RIGHT_REF, w, h);
-                    [x, y] = this.posR.update(t, x, y);
-                    const sz = this.szR.update(t, baseSz * rf);
-                    this.opacityR = Math.min(1.0, this.opacityR + FADE_SPEED);
-                    this.cacheR = [x, y, sz];
+                // ── RIGHT earring ──
+                if (show_R) {
+                    let [x, y] = this._estimate_lobe(lm, RIGHT_BASE, RIGHT_REF, w, h);
+                    [x, y] = this.pos_R.update(t, x, y);
+                    const sz = this.sz_R.update(t, base_sz * rf);
+                    this.opacity_R = Math.min(1.0, this.opacity_R + FADE_SPEED);
+                    this.cache_R = [x, y, sz];
                 } else {
-                    this.opacityR = Math.max(0.0, this.opacityR - FADE_SPEED);
+                    this.opacity_R = Math.max(0.0, this.opacity_R - FADE_SPEED);
                 }
 
-                if (this.cacheR && this.opacityR > 0.01) {
-                    this.overlay(ctx, this.earringR, ...this.cacheR, angle, this.opacityR);
+                if (this.cache_R && this.opacity_R > 0.01) {
+                    this._overlay(ctx, this.earring_R, ...this.cache_R, angle, this.opacity_R);
                 }
 
-                this.cacheAngle = angle;
+                this.cache_angle = angle;
             }
         }
 
@@ -404,7 +445,9 @@
                         delegate: "GPU"
                     },
                     runningMode: "VIDEO",
-                    numFaces: 1,
+                    numFaces: 1,                        // max_num_faces=1
+                    outputFaceBlendshapes: false,
+                    outputFacialTransformationMatrixes: false,
                     minFaceDetectionConfidence: 0.7,
                     minFacePresenceConfidence: 0.7,
                     minTrackingConfidence: 0.7
