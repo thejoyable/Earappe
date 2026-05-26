@@ -158,6 +158,74 @@
             box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.2);
         }
 
+        .scale-slider {
+            margin-top: 14px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 12px;
+        }
+
+        .scale-slider label {
+            font-size: 15px;
+            font-weight: 600;
+            color: #444;
+            white-space: nowrap;
+        }
+
+        .scale-slider input[type="range"] {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 180px;
+            height: 6px;
+            border-radius: 3px;
+            background: linear-gradient(90deg, #e2e8f0 0%, #667eea 100%);
+            outline: none;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+
+        .scale-slider input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 20px;
+            height: 20px;
+            border-radius: 50%;
+            background: linear-gradient(135deg, #667eea, #764ba2);
+            border: 2px solid white;
+            box-shadow: 0 2px 6px rgba(102, 126, 234, 0.4);
+            cursor: grab;
+            transition: transform 0.15s ease, box-shadow 0.15s ease;
+        }
+
+        .scale-slider input[type="range"]::-webkit-slider-thumb:hover {
+            transform: scale(1.15);
+            box-shadow: 0 3px 10px rgba(102, 126, 234, 0.5);
+        }
+
+        .scale-slider input[type="range"]::-webkit-slider-thumb:active {
+            cursor: grabbing;
+            transform: scale(1.05);
+        }
+
+        .scale-slider input[type="range"]::-moz-range-thumb {
+            width: 20px;
+            height: 20px;
+            border-radius: 50%;
+            background: linear-gradient(135deg, #667eea, #764ba2);
+            border: 2px solid white;
+            box-shadow: 0 2px 6px rgba(102, 126, 234, 0.4);
+            cursor: grab;
+        }
+
+        .scale-slider .scale-value {
+            font-size: 14px;
+            font-weight: 600;
+            color: #667eea;
+            min-width: 36px;
+            text-align: center;
+        }
+
         .loading {
             display: none;
             text-align: center;
@@ -207,6 +275,16 @@
                 <option value="" disabled selected>Loading earrings...</option>
             </select>
         </div>
+        <div class="scale-slider">
+            <label for="scaleSlider">🔍 Size:</label>
+            <input type="range" id="scaleSlider" min="0.1" max="2.0" step="0.05" value="0.35">
+            <span class="scale-value" id="scaleValue">0.35</span>
+        </div>
+        <div class="scale-slider">
+            <label for="rotationSlider">🔄 Angle:</label>
+            <input type="range" id="rotationSlider" min="0" max="180" step="1" value="38">
+            <span class="scale-value" id="rotationValue">38°</span>
+        </div>
         <div class="status" id="status">Click "Start Camera" to begin</div>
         <div class="loading" id="loading">
             <div class="spinner"></div>
@@ -248,8 +326,9 @@
         // Scale factor: how large the 3D model should be relative to
         // the earring "size" in pixels. The model is normalized to 1 unit max,
         // and the camera maps 1 unit = 1 pixel, so 1.0 means the model will
-        // be exactly `sz` pixels tall. Adjust if model appears too big/small.
-        const MODEL_SCALE_FACTOR = 0.5;
+        // be exactly `sz` pixels tall. Adjust via slider.
+        let MODEL_SCALE_FACTOR = 0.35;
+        let OUTWARD_FLARE = 38 * Math.PI / 180; // 38 degrees in radians
 
         // ═══════════════════════════════════════════════════════════════
         // ONE EURO FILTER  –  adaptive low-pass used by Snap / IG
@@ -466,7 +545,9 @@
                 this.sz_R = new ScalarStabilizer(0.5, 0.05);
 
                 // ── global stabilizers ──
-                this.angle_stab = new ScalarStabilizer(1.2, 0.3);
+                this.roll_stab = new ScalarStabilizer(1.2, 0.3);
+                this.yaw_stab = new ScalarStabilizer(1.0, 0.25);
+                this.pitch_stab = new ScalarStabilizer(1.0, 0.25);
                 this.faceh_stab = new ScalarStabilizer(0.6, 0.05);
 
                 // ── fade state ──
@@ -474,7 +555,7 @@
                 this.opacity_R = 0.0;
                 this.cache_L = null;      // { x, y, sz }
                 this.cache_R = null;
-                this.cache_angle = 0.0;
+                this.cache_pose = { yaw: 0, pitch: 0, roll: 0 };
                 this.t0 = performance.now() / 1000;
             }
 
@@ -548,8 +629,45 @@
                 return [px * w, py * h];
             }
 
+            // ─────────────────── head pose extraction ───────────────────
+            _extractHeadPose(results) {
+                /**
+                 * Extract yaw, pitch, roll from MediaPipe's facial
+                 * transformation matrix (4x4 column-major).
+                 * Returns angles in radians.
+                 * Falls back to landmark-based roll if matrix unavailable.
+                 */
+                if (results.facialTransformationMatrixes &&
+                    results.facialTransformationMatrixes.length > 0) {
+                    const m = results.facialTransformationMatrixes[0].data;
+                    // MediaPipe gives a 4x4 column-major matrix
+                    // m[0..3] = col0, m[4..7] = col1, m[8..11] = col2, m[12..15] = col3
+                    const r00 = m[0], r01 = m[4], r02 = m[8];
+                    const r10 = m[1], r11 = m[5], r12 = m[9];
+                    const r20 = m[2], r21 = m[6], r22 = m[10];
+
+                    // Extract Euler angles (YXZ order suits head rotation)
+                    const pitch = Math.asin(-Math.max(-1, Math.min(1, r12)));
+                    let yaw, roll;
+
+                    if (Math.abs(r12) < 0.9999) {
+                        yaw = Math.atan2(r02, r22);
+                        roll = Math.atan2(r10, r11);
+                    } else {
+                        // Gimbal lock
+                        yaw = Math.atan2(-r20, r00);
+                        roll = 0;
+                    }
+
+                    return { yaw, pitch, roll };
+                }
+
+                // Fallback: only roll from eye landmarks
+                return { yaw: 0, pitch: 0, roll: 0 };
+            }
+
             // ─────────────────── 3D overlay ───────────────────
-            _update3D(group, cx, cy, sz, angle_deg, opacity, w, h) {
+            _update3D(group, cx, cy, sz, yaw_rad, pitch_rad, roll_rad, opacity, w, h, isLeft) {
                 if (!modelLoaded || sz < 4) {
                     group.visible = false;
                     return;
@@ -561,7 +679,6 @@
                 const y3d = -(cy - h / 2);  // flip Y
 
                 const scale = sz * MODEL_SCALE_FACTOR;
-                const angle_applied = angle_deg * TILT_DAMPING;
 
                 group.position.set(x3d, y3d, 0);
 
@@ -569,7 +686,28 @@
                 const baseScaleX = Math.sign(group.scale.x) || 1;
                 group.scale.set(baseScaleX * scale, scale, scale);
 
-                group.rotation.set(0, 0, -angle_applied * Math.PI / 180);
+                // ✨ Base Rotation & Damping ✨
+                // Slight upward tilt prevents the stud from sagging
+                const UPWARD_TILT = 0.15;
+
+                const dampedYaw = yaw_rad * 0.8;
+                const dampedPitch = pitch_rad * 0.6;
+                const dampedRoll = roll_rad * TILT_DAMPING;
+
+                // Apply rotation based on which ear it is
+                if (isLeft) {
+                    group.rotation.set(
+                        -dampedPitch - UPWARD_TILT, 
+                        dampedYaw - OUTWARD_FLARE, 
+                        -dampedRoll
+                    );
+                } else {
+                    group.rotation.set(
+                        -dampedPitch - UPWARD_TILT, 
+                        dampedYaw + OUTWARD_FLARE, 
+                        -dampedRoll
+                    );
+                }
 
                 // Fade via material opacity
                 group.visible = opacity > 0.01;
@@ -591,13 +729,14 @@
                     this.opacity_L = Math.max(0.0, this.opacity_L - FADE_SPEED);
                     this.opacity_R = Math.max(0.0, this.opacity_R - FADE_SPEED);
 
+                    const p = this.cache_pose;
                     if (this.cache_L && this.opacity_L > 0.01) {
-                        this._update3D(earringGroupL, this.cache_L.x, this.cache_L.y, this.cache_L.sz, this.cache_angle, this.opacity_L, w, h);
+                        this._update3D(earringGroupL, this.cache_L.x, this.cache_L.y, this.cache_L.sz, p.yaw, p.pitch, p.roll, this.opacity_L, w, h, true);
                     } else {
                         earringGroupL.visible = false;
                     }
                     if (this.cache_R && this.opacity_R > 0.01) {
-                        this._update3D(earringGroupR, this.cache_R.x, this.cache_R.y, this.cache_R.sz, this.cache_angle, this.opacity_R, w, h);
+                        this._update3D(earringGroupR, this.cache_R.x, this.cache_R.y, this.cache_R.sz, p.yaw, p.pitch, p.roll, this.opacity_R, w, h, false);
                     } else {
                         earringGroupR.visible = false;
                     }
@@ -607,9 +746,20 @@
                 const lm = results.faceLandmarks[0];
                 const [show_L, show_R] = this._visibility(lm, w, h);
 
+                // ── head pose from transformation matrix (stabilised) ──
+                const rawPose = this._extractHeadPose(results);
+                const yaw = this.yaw_stab.update(t, rawPose.yaw);
+                const pitch = this.pitch_stab.update(t, rawPose.pitch);
+                // Use matrix roll if available, else fallback to landmark roll
+                let rawRoll = rawPose.roll;
+                if (rawRoll === 0 && rawPose.yaw === 0) {
+                    // Matrix wasn't available, use landmark-based roll
+                    rawRoll = this._head_roll_deg(lm, w, h) * Math.PI / 180;
+                }
+                const roll = this.roll_stab.update(t, rawRoll);
+
                 // ── face-wide metrics (stabilised) ──
                 const fh = this.faceh_stab.update(t, this._face_height(lm, w, h));
-                const angle = this.angle_stab.update(t, this._head_roll_deg(lm, w, h));
                 const [lf, rf] = this._yaw_factors(lm, w, h);
                 const base_sz = fh * EARRING_SIZE_RATIO;
 
@@ -625,7 +775,7 @@
                 }
 
                 if (this.cache_L && this.opacity_L > 0.01) {
-                    this._update3D(earringGroupL, this.cache_L.x, this.cache_L.y, this.cache_L.sz, angle, this.opacity_L, w, h);
+                    this._update3D(earringGroupL, this.cache_L.x, this.cache_L.y, this.cache_L.sz, yaw, pitch, roll, this.opacity_L, w, h, true);
                 } else {
                     earringGroupL.visible = false;
                 }
@@ -642,12 +792,12 @@
                 }
 
                 if (this.cache_R && this.opacity_R > 0.01) {
-                    this._update3D(earringGroupR, this.cache_R.x, this.cache_R.y, this.cache_R.sz, angle, this.opacity_R, w, h);
+                    this._update3D(earringGroupR, this.cache_R.x, this.cache_R.y, this.cache_R.sz, yaw, pitch, roll, this.opacity_R, w, h, false);
                 } else {
                     earringGroupR.visible = false;
                 }
 
-                this.cache_angle = angle;
+                this.cache_pose = { yaw, pitch, roll };
             }
         }
 
@@ -660,6 +810,23 @@
         const statusEl = document.getElementById('status');
         const loadingEl = document.getElementById('loading');
         const modelSelect = document.getElementById('modelSelect');
+        const scaleSlider = document.getElementById('scaleSlider');
+        const scaleValue = document.getElementById('scaleValue');
+        const rotationSlider = document.getElementById('rotationSlider');
+        const rotationValue = document.getElementById('rotationValue');
+
+        // ── Scale slider: updates MODEL_SCALE_FACTOR live ──
+        scaleSlider.addEventListener('input', () => {
+            MODEL_SCALE_FACTOR = parseFloat(scaleSlider.value);
+            scaleValue.textContent = MODEL_SCALE_FACTOR.toFixed(2);
+        });
+
+        // ── Rotation slider: updates OUTWARD_FLARE live ──
+        rotationSlider.addEventListener('input', () => {
+            const deg = parseInt(rotationSlider.value);
+            OUTWARD_FLARE = deg * Math.PI / 180;
+            rotationValue.textContent = deg + '°';
+        });
 
         let faceLandmarker, stream = null, animationId = null;
         let tracker = new AREarTracker3D();
@@ -719,7 +886,7 @@
 
         // Override _update3D to use cached materials (patched after load)
         const origUpdate3D = AREarTracker3D.prototype._update3D;
-        AREarTracker3D.prototype._update3D = function (group, cx, cy, sz, angle_deg, opacity, w, h) {
+        AREarTracker3D.prototype._update3D = function (group, cx, cy, sz, yaw_rad, pitch_rad, roll_rad, opacity, w, h, isLeft) {
             if (!modelLoaded || sz < 4) {
                 group.visible = false;
                 return;
@@ -738,7 +905,6 @@
             const y3d = -(cy - h / 2);  // flip Y
 
             const scale = sz * MODEL_SCALE_FACTOR;
-            const angle_applied = angle_deg * TILT_DAMPING;
 
             group.position.set(x3d, y3d, 0);
 
@@ -746,7 +912,26 @@
             const baseScaleX = Math.sign(group.scale.x) || 1;
             group.scale.set(baseScaleX * scale, scale, scale);
 
-            group.rotation.set(0, 0, -angle_applied * Math.PI / 180);
+            // ✨ Base Rotation & Damping ✨
+            const UPWARD_TILT = 0.15;
+
+            const dampedYaw = yaw_rad * 0.8;
+            const dampedPitch = pitch_rad * 0.6;
+            const dampedRoll = roll_rad * TILT_DAMPING;
+
+            if (isLeft) {
+                group.rotation.set(
+                    -dampedPitch - UPWARD_TILT, 
+                    dampedYaw - OUTWARD_FLARE, 
+                    -dampedRoll
+                );
+            } else {
+                group.rotation.set(
+                    -dampedPitch - UPWARD_TILT, 
+                    dampedYaw + OUTWARD_FLARE, 
+                    -dampedRoll
+                );
+            }
 
             // Fade via cached material opacity
             group.visible = opacity > 0.01;
@@ -772,7 +957,7 @@
                     runningMode: "VIDEO",
                     numFaces: 1,                        // max_num_faces=1
                     outputFaceBlendshapes: false,
-                    outputFacialTransformationMatrixes: false,
+                    outputFacialTransformationMatrixes: true,
                     minFaceDetectionConfidence: 0.7,
                     minFacePresenceConfidence: 0.7,
                     minTrackingConfidence: 0.7
