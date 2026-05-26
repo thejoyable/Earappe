@@ -1,4 +1,4 @@
-from flask import Flask, render_template, send_from_directory
+from flask import Flask, render_template, send_from_directory, jsonify
 import os
 
 app = Flask(__name__)
@@ -6,6 +6,16 @@ app = Flask(__name__)
 @app.route('/')
 def index():
     return render_template('index.html')
+
+@app.route('/api/models')
+def list_models():
+    """Return a JSON list of all .glb files in the static folder."""
+    static_dir = os.path.join(app.root_path, 'static')
+    glb_files = sorted([
+        f for f in os.listdir(static_dir)
+        if f.lower().endswith('.glb')
+    ])
+    return jsonify(glb_files)
 
 @app.route('/static/<path:filename>')
 def serve_static(filename):

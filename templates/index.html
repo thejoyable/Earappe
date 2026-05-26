@@ -115,6 +115,49 @@
             font-size: 14px;
         }
 
+        .earring-selector {
+            margin-top: 18px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 12px;
+        }
+
+        .earring-selector label {
+            font-size: 15px;
+            font-weight: 600;
+            color: #444;
+        }
+
+        .earring-selector select {
+            padding: 10px 36px 10px 16px;
+            font-size: 15px;
+            border: 2px solid #e2e8f0;
+            border-radius: 12px;
+            background: linear-gradient(135deg, #f8f9ff 0%, #f0f0ff 100%);
+            color: #333;
+            font-weight: 500;
+            cursor: pointer;
+            outline: none;
+            transition: all 0.3s ease;
+            appearance: none;
+            -webkit-appearance: none;
+            background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8'%3E%3Cpath d='M1 1l5 5 5-5' stroke='%23667eea' stroke-width='2' fill='none'/%3E%3C/svg%3E");
+            background-repeat: no-repeat;
+            background-position: right 12px center;
+            min-width: 200px;
+        }
+
+        .earring-selector select:hover {
+            border-color: #667eea;
+            box-shadow: 0 2px 8px rgba(102, 126, 234, 0.15);
+        }
+
+        .earring-selector select:focus {
+            border-color: #667eea;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.2);
+        }
+
         .loading {
             display: none;
             text-align: center;
@@ -157,6 +200,12 @@
         <div class="controls">
             <button id="startButton">Start Camera</button>
             <button id="stopButton" disabled>Stop</button>
+        </div>
+        <div class="earring-selector">
+            <label for="modelSelect">💎 Earring:</label>
+            <select id="modelSelect">
+                <option value="" disabled selected>Loading earrings...</option>
+            </select>
         </div>
         <div class="status" id="status">Click "Start Camera" to begin</div>
         <div class="loading" id="loading">
@@ -325,53 +374,83 @@
         scene.add(earringGroupR);
 
         let modelLoaded = false;
-
-        // Load stud.glb
         const loader = new GLTFLoader();
-        loader.load('/static/stud.glb', (gltf) => {
-            const model = gltf.scene;
+        let currentModelName = '';
 
-            // Normalize the model: center it and scale so its bounding box
-            // has a max dimension of 1.0, making MODEL_SCALE_FACTOR predictable.
-            const box = new THREE.Box3().setFromObject(model);
-            const center = box.getCenter(new THREE.Vector3());
-            const size = box.getSize(new THREE.Vector3());
-            const maxDim = Math.max(size.x, size.y, size.z);
+        /**
+         * Load a .glb model by filename and attach it to both ear groups.
+         * Cleans up any previously loaded model first.
+         */
+        function loadModel(filename) {
+            if (filename === currentModelName) return;
 
-            console.log('Model bounding box:', size);
-            console.log('Model center:', center);
-            console.log('Max dimension:', maxDim);
+            // ── Cleanup previous model ──
+            modelLoaded = false;
+            materialsInitialized = false;
+            materialCache.clear();
+            earringGroupL.visible = false;
+            earringGroupR.visible = false;
 
-            model.position.sub(center);               // center at origin
-            model.scale.multiplyScalar(1.0 / maxDim);  // normalize to unit size
+            // Remove old children
+            while (earringGroupL.children.length > 0) {
+                earringGroupL.remove(earringGroupL.children[0]);
+            }
+            while (earringGroupR.children.length > 0) {
+                earringGroupR.remove(earringGroupR.children[0]);
+            }
+            // Reset scale (the mirror flag gets cleared when we remove children)
+            earringGroupL.scale.set(1, 1, 1);
+            earringGroupR.scale.set(1, 1, 1);
 
-            // Ensure all materials are visible
-            model.traverse((child) => {
-                if (child.isMesh) {
-                    child.material.transparent = true;
-                    child.material.depthWrite = true;
-                    child.material.side = THREE.DoubleSide;
-                    console.log('Mesh found:', child.name, 'material:', child.material.type);
+            currentModelName = filename;
+            const url = `/static/${filename}`;
+            console.log(`Loading model: ${filename}...`);
+
+            loader.load(url, (gltf) => {
+                const model = gltf.scene;
+
+                // Normalize the model: center it and scale so its bounding box
+                // has a max dimension of 1.0, making MODEL_SCALE_FACTOR predictable.
+                const box = new THREE.Box3().setFromObject(model);
+                const center = box.getCenter(new THREE.Vector3());
+                const size = box.getSize(new THREE.Vector3());
+                const maxDim = Math.max(size.x, size.y, size.z);
+
+                console.log('Model bounding box:', size);
+                console.log('Max dimension:', maxDim);
+
+                model.position.sub(center);               // center at origin
+                model.scale.multiplyScalar(1.0 / maxDim);  // normalize to unit size
+
+                // Ensure all materials are visible
+                model.traverse((child) => {
+                    if (child.isMesh) {
+                        child.material.transparent = true;
+                        child.material.depthWrite = true;
+                        child.material.side = THREE.DoubleSide;
+                    }
+                });
+
+                // Left earring – direct clone
+                const leftModel = model.clone();
+                earringGroupL.add(leftModel);
+
+                // Right earring – mirrored on X axis
+                const rightModel = model.clone();
+                earringGroupR.add(rightModel);
+                // Mirror by flipping X scale on the group
+                earringGroupR.scale.x = -1;
+
+                modelLoaded = true;
+                console.log(`${filename} loaded and ready ✓`);
+            }, (progress) => {
+                if (progress.total > 0) {
+                    console.log(`Loading ${filename}: ${Math.round((progress.loaded / progress.total) * 100)}%`);
                 }
+            }, (error) => {
+                console.error(`Error loading ${filename}:`, error);
             });
-
-            // Left earring – direct clone
-            const leftModel = model.clone();
-            earringGroupL.add(leftModel);
-
-            // Right earring – mirrored on X axis
-            const rightModel = model.clone();
-            earringGroupR.add(rightModel);
-            // Mirror by flipping X scale on the group
-            earringGroupR.scale.x = -1;
-
-            modelLoaded = true;
-            console.log('stud.glb loaded and ready ✓');
-        }, (progress) => {
-            console.log('Loading stud.glb:', Math.round((progress.loaded / progress.total) * 100) + '%');
-        }, (error) => {
-            console.error('Error loading stud.glb:', error);
-        });
+        }
 
         // ═══════════════════════════════════════════════════════════════
         // AR EARRING TRACKER (3D version)
@@ -580,10 +659,48 @@
         const stopButton = document.getElementById('stopButton');
         const statusEl = document.getElementById('status');
         const loadingEl = document.getElementById('loading');
+        const modelSelect = document.getElementById('modelSelect');
 
         let faceLandmarker, stream = null, animationId = null;
         let tracker = new AREarTracker3D();
         let lastVideoTime = -1;
+
+        // ── Populate dropdown and load first model ──
+        async function populateModelDropdown() {
+            try {
+                const res = await fetch('/api/models');
+                const models = await res.json();
+                modelSelect.innerHTML = '';
+
+                if (models.length === 0) {
+                    modelSelect.innerHTML = '<option value="" disabled>No .glb files found</option>';
+                    return;
+                }
+
+                models.forEach((name, i) => {
+                    const opt = document.createElement('option');
+                    opt.value = name;
+                    // Display name: remove .glb extension, replace underscores/hyphens
+                    opt.textContent = name.replace(/\.glb$/i, '').replace(/[_-]/g, ' ');
+                    modelSelect.appendChild(opt);
+                });
+
+                // Select and load the first model
+                modelSelect.selectedIndex = 0;
+                loadModel(models[0]);
+            } catch (err) {
+                console.error('Failed to fetch model list:', err);
+                modelSelect.innerHTML = '<option value="" disabled>Error loading list</option>';
+            }
+        }
+
+        // ── Switch model when dropdown changes ──
+        modelSelect.addEventListener('change', () => {
+            const selected = modelSelect.value;
+            if (selected) {
+                loadModel(selected);
+            }
+        });
 
         // Cache materials to avoid cloning every frame
         let materialsInitialized = false;
@@ -777,6 +894,7 @@
         startButton.addEventListener('click', startCamera);
         stopButton.addEventListener('click', stopCamera);
         startButton.disabled = true;
+        populateModelDropdown();
         initializeMediaPipe();
     </script>
 </body>
